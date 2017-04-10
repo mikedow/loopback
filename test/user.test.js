@@ -12,6 +12,8 @@ var User, AccessToken;
 var async = require('async');
 var url = require('url');
 var extend = require('util')._extend;
+const Promise = require('bluebird');
+const waitForEvent = require('./helpers/wait-for-event');
 
 describe('User', function() {
   this.timeout(10000);
@@ -2171,6 +2173,44 @@ describe('User', function() {
           });
       });
 
+      it('creates token that allows patching User with new password', () => {
+        return triggerPasswordReset(options.email)
+          .then(info => {
+            // Make a REST request to change the password
+            return request(app)
+              .patch(`/test-users/${info.user.id}`)
+              .set('Authorization', info.accessToken.id)
+              .send({password: 'new-pass'})
+              .expect(200);
+          })
+          .then(() => {
+            // Call login to verify the password was changed
+            const credentials = {email: options.email, password: 'new-pass'};
+            return User.login(credentials);
+          });
+      });
+
+      it('creates token that allows calling other endpoints too', () => {
+        // Setup a test method that can be executed by $owner only
+        User.prototype.testMethod = function(cb) { cb(null, 'ok'); };
+        User.remoteMethod('prototype.testMethod', {
+          returns: {arg: 'status', type: 'string'},
+          http: {verb: 'get', path: '/test'},
+        });
+        User.settings.acls.push({
+          principalType: 'ROLE',
+          principalId: '$owner',
+          permission: 'ALLOW',
+          property: 'testMethod',
+        });
+
+        return triggerPasswordReset(options.email)
+          .then(info => request(app)
+            .get(`/test-users/${info.user.id}/test`)
+            .set('Authorization', info.accessToken.id)
+            .expect(200));
+      });
+
       describe('User.resetPassword(options, cb) requiring realm', function() {
         var realmUser;
 
@@ -2794,4 +2834,12 @@ describe('User', function() {
       expect(User2.settings.ttl).to.equal(10);
     });
   });
+
+  function triggerPasswordReset(email) {
+    return Promise.all([
+      User.resetPassword({email: email}),
+      waitForEvent(User, 'resetPasswordRequest'),
+    ])
+    .spread((reset, info) => info);
+  }
 });
